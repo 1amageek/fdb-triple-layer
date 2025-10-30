@@ -1,15 +1,20 @@
 import Foundation
 @preconcurrency import FoundationDB
 import Logging
+import Synchronization
 
-/// Actor responsible for managing bidirectional Value ↔ ID mappings
+/// Class responsible for managing bidirectional Value ↔ ID mappings
 ///
 /// DictionaryStore provides:
 /// - Atomic ID allocation using a counter
 /// - Bidirectional lookups (Value → ID and ID → Value)
 /// - In-memory LRU cache for performance
-/// - Thread-safe access via Actor isolation
-actor DictionaryStore {
+/// - Thread-safe access via Mutex
+///
+/// Thread safety is provided by:
+/// - Swift Synchronization.Mutex for cache access (~1μs overhead vs ~10μs for actor)
+/// - FoundationDB transaction model for database operations
+final class DictionaryStore: Sendable {
 
     // MARK: - Properties
 
@@ -17,14 +22,17 @@ actor DictionaryStore {
     private let rootPrefix: String
     private let logger: Logger
 
+    /// Cache state protected by Mutex
+    private struct CacheState {
+        var valueToIdCache: [Value: UInt64] = [:]
+        var idToValueCache: [UInt64: Value] = [:]
+    }
+
     /// Maximum cache size (LRU eviction when exceeded)
     private let maxCacheSize: Int
 
-    /// Value → ID cache
-    private var valueToIdCache: [Value: UInt64] = [:]
-
-    /// ID → Value cache
-    private var idToValueCache: [UInt64: Value] = [:]
+    /// Mutex-protected cache state
+    private let cache: Mutex<CacheState>
 
     // MARK: - Initialization
 
@@ -38,16 +46,19 @@ actor DictionaryStore {
         self.rootPrefix = rootPrefix
         self.maxCacheSize = maxCacheSize
         self.logger = logger ?? Logger(label: "com.triplelayer.dictionarystore")
+        self.cache = Mutex(CacheState())
     }
 
     // MARK: - Public API
 
     /// Gets an existing ID for a value, or returns nil if not found
     func getExistingID(for value: Value, transaction: any TransactionProtocol) async throws -> UInt64? {
-        // Check cache first
-        if let cachedID = valueToIdCache[value] {
+        // Check cache first (with Mutex)
+        let cachedID = cache.withLock { $0.valueToIdCache[value] }
+
+        if let id = cachedID {
             logger.trace("Cache hit for value → ID: \(value)")
-            return cachedID
+            return id
         }
 
         // Lookup in database
@@ -58,7 +69,7 @@ actor DictionaryStore {
 
         let id = TupleHelpers.decodeUInt64(bytes)
 
-        // Update cache
+        // Update cache (with Mutex)
         updateCache(value: value, id: id)
 
         return id
@@ -66,10 +77,12 @@ actor DictionaryStore {
 
     /// Gets or creates an ID for a value
     func getOrCreateID(for value: Value, transaction: any TransactionProtocol) async throws -> UInt64 {
-        // Check cache first
-        if let cachedID = valueToIdCache[value] {
+        // Check cache first (with Mutex)
+        let cachedID = cache.withLock { $0.valueToIdCache[value] }
+
+        if let id = cachedID {
             logger.trace("Cache hit for value → ID: \(value)")
-            return cachedID
+            return id
         }
 
         // Check if ID already exists in database
@@ -78,7 +91,7 @@ actor DictionaryStore {
         if let idBytes = try await transaction.getValue(for: valueKey) {
             let id = TupleHelpers.decodeUInt64(idBytes)
 
-            // Update cache
+            // Update cache (with Mutex)
             updateCache(value: value, id: id)
 
             return id
@@ -111,7 +124,7 @@ actor DictionaryStore {
         let valueData = try encodeValue(value)
         transaction.setValue(valueData, for: idKey)
 
-        // Update cache
+        // Update cache (with Mutex)
         updateCache(value: value, id: newID)
 
         logger.debug("Created new ID \(newID) for value: \(value)")
@@ -120,10 +133,12 @@ actor DictionaryStore {
 
     /// Gets the value for an ID
     func getValue(for id: UInt64, transaction: any TransactionProtocol) async throws -> Value {
-        // Check cache first
-        if let cachedValue = idToValueCache[id] {
+        // Check cache first (with Mutex)
+        let cachedValue = cache.withLock { $0.idToValueCache[id] }
+
+        if let value = cachedValue {
             logger.trace("Cache hit for ID → value: \(id)")
-            return cachedValue
+            return value
         }
 
         // Lookup in database
@@ -134,7 +149,7 @@ actor DictionaryStore {
 
         let value = try decodeValue(bytes)
 
-        // Update cache
+        // Update cache (with Mutex)
         updateCache(value: value, id: id)
 
         return value
@@ -143,28 +158,32 @@ actor DictionaryStore {
     // MARK: - Cache Management
 
     private func updateCache(value: Value, id: UInt64) {
-        // Simple cache management: if over limit, clear some entries
-        if valueToIdCache.count >= maxCacheSize {
-            // Remove oldest ~10% of entries (simple strategy)
-            let toRemove = maxCacheSize / 10
-            let keysToRemove = Array(valueToIdCache.keys.prefix(toRemove))
-            for key in keysToRemove {
-                if let idToRemove = valueToIdCache[key] {
-                    idToValueCache.removeValue(forKey: idToRemove)
+        cache.withLock { state in
+            // Simple cache management: if over limit, clear some entries
+            if state.valueToIdCache.count >= maxCacheSize {
+                // Remove oldest ~10% of entries (simple strategy)
+                let toRemove = maxCacheSize / 10
+                let keysToRemove = Array(state.valueToIdCache.keys.prefix(toRemove))
+                for key in keysToRemove {
+                    if let idToRemove = state.valueToIdCache[key] {
+                        state.idToValueCache.removeValue(forKey: idToRemove)
+                    }
+                    state.valueToIdCache.removeValue(forKey: key)
                 }
-                valueToIdCache.removeValue(forKey: key)
+                logger.debug("Cache evicted \(toRemove) entries")
             }
-            logger.debug("Cache evicted \(toRemove) entries")
-        }
 
-        valueToIdCache[value] = id
-        idToValueCache[id] = value
+            state.valueToIdCache[value] = id
+            state.idToValueCache[id] = value
+        }
     }
 
     /// Clears all cached entries
     func clearCache() {
-        valueToIdCache.removeAll()
-        idToValueCache.removeAll()
+        cache.withLock { state in
+            state.valueToIdCache.removeAll()
+            state.idToValueCache.removeAll()
+        }
         logger.debug("Cache cleared")
     }
 

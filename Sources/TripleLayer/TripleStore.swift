@@ -4,8 +4,11 @@ import Logging
 
 /// Public API for the Triple Store
 ///
-/// This actor provides a thread-safe interface for inserting, deleting,
+/// This struct provides a thread-safe interface for inserting, deleting,
 /// and querying triples stored in FoundationDB.
+///
+/// Thread safety is provided by FoundationDB's transaction model, not by actor isolation.
+/// This allows direct function calls without actor queuing overhead.
 ///
 /// ## Example Usage
 ///
@@ -15,7 +18,7 @@ import Logging
 /// let database = try FDBClient.openDatabase()
 ///
 /// // Create triple store
-/// let store = try await TripleStore(database: database, rootPrefix: "myapp")
+/// let store = TripleStore(database: database, rootPrefix: "myapp")
 ///
 /// // Insert a triple
 /// let alice = Value.uri("http://example.org/person/Alice")
@@ -31,7 +34,7 @@ import Logging
 ///     print(triple)
 /// }
 /// ```
-public actor TripleStore {
+public final class TripleStore: Sendable {
 
     // MARK: - Properties
 

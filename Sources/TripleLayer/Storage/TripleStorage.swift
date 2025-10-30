@@ -2,14 +2,19 @@ import Foundation
 @preconcurrency import FoundationDB
 import Logging
 
-/// Actor responsible for managing triple storage with 4 indexes
+/// Class responsible for managing triple storage with 4 indexes
 ///
 /// TripleStorage coordinates:
 /// - Converting Values to IDs via DictionaryStore
 /// - Maintaining 4 indexes (SPO, PSO, POS, OSP) for optimal queries
 /// - Managing triple count metadata
 /// - Ensuring ACID properties through FoundationDB transactions
-actor TripleStorage {
+///
+/// Thread safety is provided by:
+/// - FoundationDB's transaction model (withTransaction)
+/// - DictionaryStore actor isolation
+/// This class itself is stateless and only coordinates operations.
+final class TripleStorage: Sendable {
 
     // MARK: - Properties
 
@@ -86,7 +91,20 @@ actor TripleStorage {
                 transaction.setValue(FDB.Bytes(), for: key)
             }
 
-            // 4. Increment triple count
+            // 4. Store metadata if present
+            if let metadata = triple.metadata {
+                let metadataKey = TupleHelpers.encodeTripleMetadataKey(
+                    rootPrefix: self.rootPrefix,
+                    subjectID: subjectID,
+                    predicateID: predicateID,
+                    objectID: objectID
+                )
+                let encoder = JSONEncoder()
+                let metadataBytes = try encoder.encode(metadata)
+                transaction.setValue([UInt8](metadataBytes), for: metadataKey)
+            }
+
+            // 5. Increment triple count
             let countKey = TupleHelpers.encodeTripleCountKey(rootPrefix: self.rootPrefix)
             let increment = TupleHelpers.encodeUInt64(1)
             transaction.atomicOp(key: countKey, param: increment, mutationType: .add)
@@ -143,10 +161,23 @@ actor TripleStorage {
                     transaction.setValue(FDB.Bytes(), for: key)
                 }
 
+                // 4. Store metadata if present
+                if let metadata = triple.metadata {
+                    let metadataKey = TupleHelpers.encodeTripleMetadataKey(
+                        rootPrefix: self.rootPrefix,
+                        subjectID: subjectID,
+                        predicateID: predicateID,
+                        objectID: objectID
+                    )
+                    let encoder = JSONEncoder()
+                    let metadataBytes = try encoder.encode(metadata)
+                    transaction.setValue([UInt8](metadataBytes), for: metadataKey)
+                }
+
                 insertedCount += 1
             }
 
-            // 4. Increment triple count by the number of actually inserted triples
+            // 5. Increment triple count by the number of actually inserted triples
             if insertedCount > 0 {
                 let countKey = TupleHelpers.encodeTripleCountKey(rootPrefix: self.rootPrefix)
                 let increment = TupleHelpers.encodeUInt64(insertedCount)
@@ -207,7 +238,16 @@ actor TripleStorage {
                 transaction.clear(key: key)
             }
 
-            // 4. Decrement triple count
+            // 4. Delete metadata if it exists
+            let metadataKey = TupleHelpers.encodeTripleMetadataKey(
+                rootPrefix: self.rootPrefix,
+                subjectID: subjectID,
+                predicateID: predicateID,
+                objectID: objectID
+            )
+            transaction.clear(key: metadataKey)
+
+            // 5. Decrement triple count
             let countKey = TupleHelpers.encodeTripleCountKey(rootPrefix: self.rootPrefix)
             let decrementValue = UInt64(bitPattern: Int64(-1))
             let decrement = TupleHelpers.encodeUInt64(decrementValue)
@@ -296,10 +336,26 @@ actor TripleStorage {
                 let pValue = try await self.dictionaryStore.getValue(for: pID, transaction: transaction)
                 let oValue = try await self.dictionaryStore.getValue(for: oID, transaction: transaction)
 
+                // Retrieve metadata if it exists
+                let metadataKey = TupleHelpers.encodeTripleMetadataKey(
+                    rootPrefix: self.rootPrefix,
+                    subjectID: sID,
+                    predicateID: pID,
+                    objectID: oID
+                )
+                let metadata: Metadata?
+                if let metadataBytes = try await transaction.getValue(for: metadataKey, snapshot: true) {
+                    let decoder = JSONDecoder()
+                    metadata = try? decoder.decode(Metadata.self, from: Data(metadataBytes))
+                } else {
+                    metadata = nil
+                }
+
                 let triple = Triple(
                     subject: sValue,
                     predicate: pValue,
-                    object: oValue
+                    object: oValue,
+                    metadata: metadata
                 )
                 results.append(triple)
             }

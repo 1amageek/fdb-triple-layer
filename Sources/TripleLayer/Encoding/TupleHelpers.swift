@@ -144,6 +144,23 @@ enum TupleHelpers {
         return Tuple(rootPrefix, "meta", "ver").encode()
     }
 
+    /// Encodes a key for storing triple metadata
+    /// Format: (rootPrefix, "tmeta", subjectID, predicateID, objectID)
+    static func encodeTripleMetadataKey(
+        rootPrefix: String,
+        subjectID: UInt64,
+        predicateID: UInt64,
+        objectID: UInt64
+    ) -> FDB.Bytes {
+        return Tuple(
+            rootPrefix,
+            "tmeta",
+            Int64(bitPattern: subjectID),
+            Int64(bitPattern: predicateID),
+            Int64(bitPattern: objectID)
+        ).encode()
+    }
+
     // MARK: - Helpers
 
     /// Encodes an unsigned integer as little-endian bytes
