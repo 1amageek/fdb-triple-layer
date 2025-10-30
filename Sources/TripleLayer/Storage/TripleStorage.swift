@@ -322,6 +322,42 @@ actor TripleStorage {
         }
     }
 
+    /// Checks if a specific triple exists (efficient, does not return full data)
+    func exists(_ triple: Triple) async throws -> Bool {
+        logger.debug("Checking triple existence")
+
+        return try await db.withTransaction { transaction in
+            // Convert Values to IDs
+            guard let subjectID = try await self.dictionaryStore.getExistingID(
+                for: triple.subject,
+                transaction: transaction
+            ),
+            let predicateID = try await self.dictionaryStore.getExistingID(
+                for: triple.predicate,
+                transaction: transaction
+            ),
+            let objectID = try await self.dictionaryStore.getExistingID(
+                for: triple.object,
+                transaction: transaction
+            ) else {
+                // If any value doesn't exist, triple doesn't exist
+                return false
+            }
+
+            // Check SPO index
+            let spoKey = TupleHelpers.encodeTripleKey(
+                rootPrefix: self.rootPrefix,
+                indexType: "spo",
+                id1: subjectID,
+                id2: predicateID,
+                id3: objectID
+            )
+
+            let value = try await transaction.getValue(for: spoKey, snapshot: true)
+            return value != nil
+        }
+    }
+
     // MARK: - Helper Methods
 
     private func encodeIndexKey(

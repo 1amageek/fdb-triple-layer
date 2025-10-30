@@ -74,7 +74,11 @@ public actor TripleStore {
     /// - Parameter triple: The triple to insert
     /// - Throws: `TripleError` if the operation fails
     public func insert(_ triple: Triple) async throws {
-        logger.info("Insert: \(triple)")
+        logger.info("Inserting triple", metadata: [
+            "subject": "\(triple.subject)",
+            "predicate": "\(triple.predicate)",
+            "object": "\(triple.object)"
+        ])
         try await storage.insert(triple)
     }
 
@@ -87,7 +91,9 @@ public actor TripleStore {
     /// - Parameter triples: The triples to insert
     /// - Throws: `TripleError` if any operation fails
     public func insertBatch(_ triples: [Triple]) async throws {
-        logger.info("Inserting batch of \(triples.count) triples")
+        logger.info("Inserting batch of triples", metadata: [
+            "count": "\(triples.count)"
+        ])
 
         // Insert in batches of 1000 to avoid transaction size limits
         let batchSize = 1000
@@ -99,10 +105,15 @@ public actor TripleStore {
             // Use the batch insert method which uses a single transaction
             try await storage.insertBatch(batch)
 
-            logger.debug("Inserted batch \(batchIndex/batchSize + 1)")
+            logger.debug("Inserted batch", metadata: [
+                "batch_number": "\(batchIndex/batchSize + 1)",
+                "batch_size": "\(batch.count)"
+            ])
         }
 
-        logger.info("Batch insert complete")
+        logger.info("Batch insert complete", metadata: [
+            "total_count": "\(triples.count)"
+        ])
     }
 
     /// Deletes a triple from the store
@@ -112,7 +123,11 @@ public actor TripleStore {
     /// - Parameter triple: The triple to delete
     /// - Throws: `TripleError` if the operation fails
     public func delete(_ triple: Triple) async throws {
-        logger.info("Delete: \(triple)")
+        logger.info("Deleting triple", metadata: [
+            "subject": "\(triple.subject)",
+            "predicate": "\(triple.predicate)",
+            "object": "\(triple.object)"
+        ])
         try await storage.delete(triple)
     }
 
@@ -141,13 +156,19 @@ public actor TripleStore {
         predicate: Value? = nil,
         object: Value? = nil
     ) async throws -> [Triple] {
-        logger.info("Query: s=\(subject?.description ?? "?"), p=\(predicate?.description ?? "?"), o=\(object?.description ?? "?")")
+        logger.info("Querying triples", metadata: [
+            "subject": "\(subject?.description ?? "?")",
+            "predicate": "\(predicate?.description ?? "?")",
+            "object": "\(object?.description ?? "?")"
+        ])
         let results = try await storage.query(
             subject: subject,
             predicate: predicate,
             object: object
         )
-        logger.info("Query returned \(results.count) results")
+        logger.info("Query returned results", metadata: [
+            "count": "\(results.count)"
+        ])
         return results
     }
 
@@ -157,22 +178,21 @@ public actor TripleStore {
     /// - Throws: `TripleError` if the operation fails
     public func count() async throws -> UInt64 {
         let count = try await storage.count()
-        logger.debug("Triple count: \(count)")
+        logger.debug("Retrieved triple count", metadata: [
+            "count": "\(count)"
+        ])
         return count
     }
 
     /// Checks if a specific triple exists in the store
     ///
+    /// This method is optimized for existence checking and does not fetch the full triple data.
+    ///
     /// - Parameter triple: The triple to check
     /// - Returns: `true` if the triple exists, `false` otherwise
     /// - Throws: `TripleError` if the operation fails
     public func contains(_ triple: Triple) async throws -> Bool {
-        let results = try await storage.query(
-            subject: triple.subject,
-            predicate: triple.predicate,
-            object: triple.object
-        )
-        return !results.isEmpty
+        return try await storage.exists(triple)
     }
 }
 
